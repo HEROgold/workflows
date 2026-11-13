@@ -1,0 +1,147 @@
+name: Release
+
+# Called from a repo's workflow on pushes to the default branch. Creates a
+# GitHub release when the version in the repo has no tag yet.
+#
+# Cases when the tag for the current version already exists:
+#   - This push didn't change version-file. The job prints a notice, sets
+#     released to false and succeeds. Most pushes end here.
+#   - This push changed version-file. Another PR released this version first,
+#     so the job fails. Bump the version again in a follow-up PR.
+#
+# Inputs:
+#   version-command  Command that prints the version, for example
+#                    "uv version --short". The first x.y.z it prints is used.
+#   version-file     File whose change marks a version bump.
+#   tag-prefix       Prefix for the tag, for example "v".
+#   moving-tags      Also move <prefix><major> and <prefix><major>.<minor>.
+#   sentry           Create a Sentry release after the GitHub release.
+#   dispatch-event   Repository dispatch event type. Empty skips the dispatch.
+# Secrets (only for sentry): SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT.
+# Outputs: released ("true" or "false"), tag, version.
+on:
+  workflow_call:
+    inputs:
+      version-command:
+        type: string
+        required: true
+      version-file:
+        type: string
+        default: pyproject.toml
+      tag-prefix:
+        type: string
+        default: v
+      moving-tags:
+        type: boolean
+        default: false
+      sentry:
+        type: boolean
+        default: false
+      dispatch-event:
+        type: string
+        default: new-release-created
+    secrets:
+      SENTRY_AUTH_TOKEN:
+        required: false
+      SENTRY_ORG:
+        required: false
+      SENTRY_PROJECT:
+        required: false
+    outputs:
+      released:
+        value: ${{ jobs.release.outputs.released }}
+      tag:
+        value: ${{ jobs.release.outputs.tag }}
+      version:
+        value: ${{ jobs.release.outputs.version }}
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # version-command is usually `uv version --short`, and the runner image
+      # has no uv. Repos with another version source can ignore it.
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: Create the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_COMMAND: ${{ inputs.version-command }}
+          VERSION_FILE: ${{ inputs.version-file }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          MOVING_TAGS: ${{ inputs.moving-tags }}
+        run: |
+          set -eu
+          VERSION=$(bash -c "$VERSION_COMMAND" | grep -oE -m1 '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+          if [ -z "$VERSION" ]; then
+            echo "::error::No x.y.z version found in the output of: $VERSION_COMMAND"
+            exit 1
+          fi
+          TAG="${TAG_PREFIX}${VERSION}"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            if git diff --quiet HEAD^1 HEAD -- "$VERSION_FILE"; then
+              echo "$TAG already exists and this push didn't change the version; nothing to release."
+              echo "released=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::$TAG already exists, but this push changed the version in $VERSION_FILE. Another PR released this version first. Bump again in a follow-up PR."
+            exit 1
+          fi
+
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+          if [ "$MOVING_TAGS" = "true" ]; then
+            MAJOR="${VERSION%%.*}"
+            MINOR="${VERSION#*.}"
+            MINOR="${MINOR%%.*}"
+            for NAME in "${TAG_PREFIX}${MAJOR}" "${TAG_PREFIX}${MAJOR}.${MINOR}"; do
+              if ! gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$NAME" -f sha="$GITHUB_SHA" -F force=true > /dev/null 2>&1; then
+                gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$NAME" -f sha="$GITHUB_SHA" > /dev/null
+              fi
+              echo "Moved $NAME to $GITHUB_SHA."
+            done
+          fi
+
+      - name: Create the Sentry release
+        if: inputs.sentry && steps.release.outputs.released == 'true'
+        uses: getsentry/action-release@d55c8c3b7375607e972b710f12926b676d89d7d2 # v3.8.0
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        with:
+          environment: production
+          version: ${{ steps.release.outputs.version }}
+
+      - name: Dispatch the release event
+        if: inputs.dispatch-event != '' && steps.release.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_EVENT: ${{ inputs.dispatch-event }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" -f event_type="$DISPATCH_EVENT" -f "client_payload[version]=$VERSION"

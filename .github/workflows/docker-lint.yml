@@ -1,0 +1,71 @@
+name: Docker lint
+
+# Called from a repo's CI workflow. Lints Dockerfiles with hadolint and droast.
+# The two linters cover different rules. hadolint checks shell issues on RUN
+# lines. droast checks root user, missing HEALTHCHECK and unsafe curl pipes.
+#
+# Inputs:
+#   dockerfiles  JSON list of Dockerfile paths to lint.
+on:
+  workflow_call:
+    inputs:
+      dockerfiles:
+        type: string
+        default: '["Dockerfile"]'
+
+permissions: {}
+
+jobs:
+  hadolint:
+    name: hadolint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: ${{ fromJSON(inputs.dockerfiles) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+
+  droast:
+    name: droast
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cache droast binary
+        id: cache-droast
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/droast
+          key: droast-${{ runner.os }}-1.4.8
+
+      # The crate is published as `dockerfile-roast`; it installs a `droast` binary.
+      - name: Install droast
+        if: steps.cache-droast.outputs.cache-hit != 'true'
+        run: cargo install dockerfile-roast --version 1.4.8 --locked
+
+      # Respects droast.toml in the repo. droast exits non-zero on
+      # ERROR-severity findings, which fails this job.
+      - name: Run droast
+        env:
+          DOCKERFILES: ${{ inputs.dockerfiles }}
+        run: |
+          FILES=$(jq -r '.[]' <<< "$DOCKERFILES")
+          # Word splitting is intended: one argument per Dockerfile.
+          # shellcheck disable=SC2086
+          droast --format github $FILES
