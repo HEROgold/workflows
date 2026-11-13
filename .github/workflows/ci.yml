@@ -1,0 +1,48 @@
+name: CI
+
+# This repo's own CI. Pull requests run workflow-lint on every workflow here.
+# A push to main that passes releases the version in VERSION when it has no
+# tag yet, and moves the v<major> and v<major>.<minor> tags to it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to a PR cancels its older run. Pushes to main each get their
+# own group, so a merge's run, and its release, is never dropped.
+concurrency:
+  group: ${{ github.event_name == 'push' && github.run_id || format('ci-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  workflow-lint:
+    uses: $/.github/workflows/workflow-lint.yml
+    permissions:
+      contents: read
+
+  # The only check to require in the ruleset.
+  all-checks:
+    if: always()
+    needs: [workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail if a check failed or was cancelled
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+
+  release:
+    needs: all-checks
+    if: always() && github.event_name == 'push' && needs.all-checks.result == 'success'
+    uses: $/.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      version-command: cat VERSION
+      version-file: VERSION
+      moving-tags: true
+      dispatch-event: ""
