@@ -1,0 +1,88 @@
+name: Test
+
+# Called by a project's CI workflow, usually once per Python version.
+# Inputs:
+# python-version is the Python to test on.
+# sync-args holds the extra arguments for `uv sync`.
+# pytest-args holds the arguments for `uv run pytest`.
+# import-check is a module name. When set, a second job builds the wheel and
+# imports that module with only the declared dependencies.
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to test on.
+        required: true
+        type: string
+      sync-args:
+        description: Extra arguments for `uv sync`.
+        type: string
+        default: "--group dev"
+      pytest-args:
+        description: Arguments for `uv run pytest`.
+        type: string
+        default: ""
+      import-check:
+        description: Module name to import from the built wheel. Empty skips the clean-install job.
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A hit means these exact inputs already passed on this Python version.
+      # The cache only saves when the job succeeds, so a failure never hits.
+      - name: Cache pytest results
+        id: cache-pytest
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .pytest_cache
+          key: ${{ runner.os }}-pytest-${{ inputs.python-version }}-${{ hashFiles('src/**', 'tests/**', 'pyproject.toml', 'uv.lock') }}
+
+      - name: Set up the project
+        if: steps.cache-pytest.outputs.cache-hit != 'true'
+        uses: $/.github/actions/setup-uv-python
+        with:
+          python-version: ${{ inputs.python-version }}
+          sync-args: ${{ inputs.sync-args }}
+
+      - name: Run tests
+        if: steps.cache-pytest.outputs.cache-hit != 'true'
+        env:
+          PYTEST_ARGS: ${{ inputs.pytest-args }}
+        # PYTEST_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
+        run: uv run pytest $PYTEST_ARGS
+
+  # The pytest job runs with dev dependencies installed, which can hide a
+  # runtime import that isn't declared. Import the built wheel on its own.
+  clean-install:
+    if: inputs.import-check != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Build the wheel
+        run: uv build --wheel -o dist
+
+      - name: Import it with only its declared dependencies
+        env:
+          IMPORT_CHECK: ${{ inputs.import-check }}
+        run: uv run --isolated --no-project --with dist/*.whl python -c "import $IMPORT_CHECK"
