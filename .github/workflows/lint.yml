@@ -1,0 +1,76 @@
+name: Lint
+
+# Called by a project's CI workflow, once for each set of tools.
+# Inputs:
+# tools is a JSON list of {"tool": ..., "args": ...} objects, one matrix job each.
+# cache-prefix keeps the cache keys of separate callers apart.
+# python-version is the Python to install.
+# sync-args holds the extra arguments for `uv sync`.
+on:
+  workflow_call:
+    inputs:
+      tools:
+        description: JSON list of {"tool", "args"} objects, one matrix entry each.
+        required: true
+        type: string
+      cache-prefix:
+        description: Cache key prefix that keeps separate callers apart.
+        type: string
+        default: lint
+      python-version:
+        description: Python version to install.
+        type: string
+        default: "3.13"
+      sync-args:
+        description: Extra arguments for `uv sync`.
+        type: string
+        default: "--group dev"
+
+permissions: {}
+
+jobs:
+  lint:
+    name: ${{ matrix.tool }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.tools) }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # uv.lock pins every tool, so a tool upgrade changes the key.
+      # A hit means this tool already passed on these exact inputs.
+      - name: Cache lint result
+        id: cache-lint
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .lint_cache
+          key: ${{ runner.os }}-${{ inputs.cache-prefix }}-${{ matrix.tool }}-${{ hashFiles('src/**', 'tests/**', 'examples/**', 'pyproject.toml', 'uv.lock', 'ruff.toml') }}
+
+      - name: Set up the project
+        if: steps.cache-lint.outputs.cache-hit != 'true'
+        uses: $/.github/actions/setup-uv-python
+        with:
+          python-version: ${{ inputs.python-version }}
+          sync-args: ${{ inputs.sync-args }}
+
+      - name: Run the tool
+        if: steps.cache-lint.outputs.cache-hit != 'true'
+        env:
+          TOOL: ${{ matrix.tool }}
+          TOOL_ARGS: ${{ matrix.args }}
+        # TOOL_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
+        run: uv run "$TOOL" $TOOL_ARGS
+
+      - name: Record the pass
+        if: steps.cache-lint.outputs.cache-hit != 'true'
+        env:
+          TOOL: ${{ matrix.tool }}
+        run: mkdir -p .lint_cache && touch ".lint_cache/$TOOL"
