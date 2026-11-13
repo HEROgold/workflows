@@ -58,8 +58,10 @@ jobs:
         if: steps.cache-coverage.outputs.cache-hit != 'true'
         env:
           PYTEST_ARGS: ${{ inputs.pytest-args }}
-        # PYTEST_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
-        run: uv run coverage run --source=. -m pytest $PYTEST_ARGS
+        # PYTEST_ARGS holds several arguments, so it is split on whitespace into an array.
+        run: |
+          read -ra args <<< "$PYTEST_ARGS"
+          uv run coverage run --source=. -m pytest "${args[@]}"
 
       - name: Upload coverage to Coveralls
         if: steps.cache-coverage.outputs.cache-hit != 'true'
