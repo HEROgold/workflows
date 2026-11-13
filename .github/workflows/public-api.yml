@@ -1,0 +1,117 @@
+name: Public API
+
+# Called by a project's CI workflow. Runs mypy, pyright, pyrefly, ty and zuban
+# against the modules that export a public `__all__`, to show what downstream
+# users' type checkers see. The checkers can disagree, so a caller may make the
+# run informational.
+# Inputs:
+# paths is a space-separated list of files to check. Empty means discover them.
+# blocking decides whether a checker failure fails the run.
+# source-dir is the folder searched for modules with a module-level `__all__`.
+# python-version is the Python to install.
+# sync-args holds the extra arguments for `uv sync`.
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: Space-separated files to check. Empty discovers modules with __all__.
+        type: string
+        default: ""
+      blocking:
+        description: Whether a checker failure fails the run.
+        type: boolean
+        default: true
+      source-dir:
+        description: Folder searched for modules with a module-level __all__.
+        type: string
+        default: src
+      python-version:
+        description: Python version to install.
+        type: string
+        default: "3.13"
+      sync-args:
+        description: Extra arguments for `uv sync`.
+        type: string
+        default: "--group dev"
+
+permissions: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      files: ${{ steps.find.outputs.files }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A module-level `__all__` is enough of a signal that a module exports a
+      # public API, so a grep replaces an AST walk.
+      - name: Find the files to check
+        id: find
+        env:
+          PATHS: ${{ inputs.paths }}
+          SOURCE_DIR: ${{ inputs.source-dir }}
+        run: |
+          set -eu
+          if [ -n "$PATHS" ]; then
+            FILES="$PATHS"
+          else
+            FILES=$(grep -rl '^__all__' "$SOURCE_DIR" | tr '\n' ' ' || true)
+          fi
+          if [ -z "$FILES" ]; then
+            echo "No modules with a module-level __all__ found; skipping."
+          fi
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: ${{ matrix.checker }}
+    needs: discover
+    if: needs.discover.outputs.files != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ !inputs.blocking }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        checker: [mypy, pyright, pyrefly, ty, zuban]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the project
+        uses: $/.github/actions/setup-uv-python
+        with:
+          python-version: ${{ inputs.python-version }}
+          sync-args: ${{ inputs.sync-args }}
+
+      - name: Run the checker
+        env:
+          CHECKER: ${{ matrix.checker }}
+          FILES: ${{ needs.discover.outputs.files }}
+        # FILES is unquoted on purpose: it holds several paths, so word splitting is intended.
+        run: |
+          case "$CHECKER" in
+            mypy | pyright) uv run --with "$CHECKER" "$CHECKER" $FILES ;;
+            pyrefly | ty | zuban) uv run --with "$CHECKER" "$CHECKER" check $FILES ;;
+            *) echo "Unknown checker: $CHECKER" >&2; exit 1 ;;
+          esac
+
+      - name: Summary
+        if: always()
+        env:
+          CHECKER: ${{ matrix.checker }}
+          BLOCKING: ${{ inputs.blocking }}
+        run: |
+          if [ "$BLOCKING" = "true" ]; then
+            echo "$CHECKER ran as a blocking check." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$CHECKER ran as a non-blocking check, so a failure does not fail the run." >> "$GITHUB_STEP_SUMMARY"
+          fi
