@@ -1,0 +1,93 @@
+name: Skylos Analysis
+
+# Called from a repo's CI workflow on pull requests and pushes. Runs Skylos,
+# writes annotations, and comments findings on the PR.
+#
+# Inputs:
+#   gate            Fail the job when the quality gate fails. When false, the
+#                   gate step still runs and prints its summary.
+#   python-version  Python version the setup action installs.
+#   skylos-version  Skylos release to install.
+on:
+  workflow_call:
+    inputs:
+      gate:
+        type: boolean
+        default: true
+      python-version:
+        type: string
+        default: "3.14"
+      skylos-version:
+        type: string
+        default: "4.26.1"
+
+permissions: {}
+
+jobs:
+  skylos:
+    name: Skylos Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Skylos's dependency-hallucination and unused-dependency checks inspect
+      # installed package metadata to tell first-party imports and declared
+      # dependencies apart from missing ones. Without the project's own
+      # dependencies installed, it misreports them as critical findings.
+      - name: Set up the project
+        uses: $/.github/actions/setup-uv-python
+        with:
+          python-version: ${{ inputs.python-version }}
+          sync-args: --all-groups
+
+      - name: Install Skylos
+        env:
+          SKYLOS_VERSION: ${{ inputs.skylos-version }}
+        run: uv pip install "skylos==$SKYLOS_VERSION"
+
+      - name: Pull Skylos Cloud Policy
+        run: |
+          uv run skylos sync pull || echo "No Skylos Cloud policy available through GitHub OIDC; continuing with local config."
+
+      - name: Run Skylos Analysis
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            pr_base_ref="origin/${GITHUB_BASE_REF:-main}"
+            uv run skylos . --danger --quality --secrets --sca --baseline --diff-base "$pr_base_ref" --diff "$pr_base_ref" --json -o skylos-results.json
+          else
+            uv run skylos . --danger --quality --secrets --sca --baseline --json -o skylos-results.json
+          fi
+
+      - name: Quality Gate
+        if: always()
+        env:
+          GATE: ${{ inputs.gate }}
+        run: |
+          if [ "$GATE" = "true" ]; then
+            uv run skylos cicd gate --input skylos-results.json --summary
+          else
+            uv run skylos cicd gate --input skylos-results.json --summary || echo "Gate failed, but the gate input is false."
+          fi
+
+      - name: GitHub Annotations
+        if: always()
+        run: uv run skylos cicd annotate --input skylos-results.json
+
+      - name: PR Review Comments
+        if: github.event_name == 'pull_request' && always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr_base_ref="origin/${GITHUB_BASE_REF:-main}"
+          uv run skylos cicd review --input skylos-results.json --diff-base "$pr_base_ref" --evidence-cards
