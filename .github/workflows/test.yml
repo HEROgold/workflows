@@ -60,8 +60,10 @@ jobs:
         if: steps.cache-pytest.outputs.cache-hit != 'true'
         env:
           PYTEST_ARGS: ${{ inputs.pytest-args }}
-        # PYTEST_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
-        run: uv run pytest $PYTEST_ARGS
+        # PYTEST_ARGS holds several arguments, so it is split on whitespace into an array.
+        run: |
+          read -ra args <<< "$PYTEST_ARGS"
+          uv run pytest "${args[@]}"
 
   # The pytest job runs with dev dependencies installed, which can hide a
   # runtime import that isn't declared. Import the built wheel on its own.

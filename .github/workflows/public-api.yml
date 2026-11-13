@@ -96,11 +96,12 @@ jobs:
         env:
           CHECKER: ${{ matrix.checker }}
           FILES: ${{ needs.discover.outputs.files }}
-        # FILES is unquoted on purpose: it holds several paths, so word splitting is intended.
+        # FILES holds several paths, so it is split on whitespace into an array.
         run: |
+          read -ra files <<< "$FILES"
           case "$CHECKER" in
-            mypy | pyright) uv run --with "$CHECKER" "$CHECKER" $FILES ;;
-            pyrefly | ty | zuban) uv run --with "$CHECKER" "$CHECKER" check $FILES ;;
+            mypy | pyright) uv run --with "$CHECKER" "$CHECKER" "${files[@]}" ;;
+            pyrefly | ty | zuban) uv run --with "$CHECKER" "$CHECKER" check "${files[@]}" ;;
             *) echo "Unknown checker: $CHECKER" >&2; exit 1 ;;
           esac
 

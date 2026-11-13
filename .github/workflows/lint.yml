@@ -66,8 +66,10 @@ jobs:
         env:
           TOOL: ${{ matrix.tool }}
           TOOL_ARGS: ${{ matrix.args }}
-        # TOOL_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
-        run: uv run "$TOOL" $TOOL_ARGS
+        # TOOL_ARGS holds several arguments, so it is split on whitespace into an array.
+        run: |
+          read -ra args <<< "$TOOL_ARGS"
+          uv run "$TOOL" "${args[@]}"
 
       - name: Record the pass
         if: steps.cache-lint.outputs.cache-hit != 'true'
