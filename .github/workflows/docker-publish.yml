@@ -1,0 +1,134 @@
+name: Docker publish
+
+# Called from a repo's release workflow. Builds the image, scans it with Trivy,
+# and pushes it to GHCR only when the scan passes. The push reuses the build
+# cache, so it doesn't build twice. Tags come from docker/metadata-action, which
+# reads the git ref of the calling workflow.
+#
+# Inputs:
+#   image         Image name without a tag, for example ghcr.io/herogold/nota.
+#   context       Docker build context.
+#   dockerfile    Path to the Dockerfile.
+#   upload-sarif  Upload the Trivy report to the Security tab.
+# Outputs:
+#   digest        Digest of the pushed image.
+on:
+  workflow_call:
+    inputs:
+      image:
+        type: string
+        required: true
+      context:
+        type: string
+        default: .
+      dockerfile:
+        type: string
+        default: Dockerfile
+      upload-sarif:
+        type: boolean
+        default: false
+    outputs:
+      digest:
+        value: ${{ jobs.publish.outputs.digest }}
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha
+
+      - name: Build the image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          load: true
+          tags: scan-target:local
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan for the Security tab
+        if: inputs.upload-sarif
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-target:local
+          format: sarif
+          output: trivy.sarif
+          ignore-unfixed: true
+
+      - name: Keep the SARIF report
+        if: inputs.upload-sarif
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-sarif
+          path: trivy.sarif
+
+      - name: Fail on fixable high or critical findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-target:local
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: ${{ inputs.upload-sarif }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push the image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  upload-sarif:
+    if: inputs.upload-sarif && !cancelled()
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-sarif
+
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-${{ inputs.image }}
