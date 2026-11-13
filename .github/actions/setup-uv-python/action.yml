@@ -1,0 +1,51 @@
+name: Set up uv and the project
+description: Install uv and a Python version, then sync the locked dependency groups.
+
+# Called from the reusable workflows in this repo as
+# `uses: $/.github/actions/setup-uv-python`. Inputs:
+# python-version is the Python to install, sync-args holds extra arguments
+# for `uv sync` (several arguments are fine), and enable-cache turns the
+# setup-uv cache on or off.
+
+inputs:
+  python-version:
+    description: Python version to install.
+    default: "3.13"
+  sync-args:
+    description: Extra arguments for `uv sync`, such as `--group dev`.
+    default: ""
+  enable-cache:
+    description: Whether setup-uv caches the uv download cache.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        enable-cache: ${{ inputs.enable-cache }}
+
+    - name: Set up Python
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: uv python install "$PYTHON_VERSION"
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        SYNC_ARGS: ${{ inputs.sync-args }}
+      # SYNC_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
+      run: uv sync --locked --python "$PYTHON_VERSION" $SYNC_ARGS
+
+    # Without these, a later `uv run` follows .python-version back to 3.11
+    # and re-syncs only the default groups, dropping the ones synced above.
+    - name: Keep later uv commands on this environment
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: | # zizmor: ignore[github-env] writes only the python-version input and a constant
+        echo "UV_PYTHON=$PYTHON_VERSION" >> "$GITHUB_ENV"
+        echo "UV_NO_SYNC=1" >> "$GITHUB_ENV"
