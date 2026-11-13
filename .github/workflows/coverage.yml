@@ -1,0 +1,73 @@
+name: Coverage
+
+# Called by a project's CI workflow on pushes to the default branch.
+# It is informational, so nothing waits on it.
+# Inputs:
+# python-version is the Python to install.
+# sync-args holds the extra arguments for `uv sync`.
+# pytest-args holds the arguments for `pytest` under coverage.
+# The COVERALLS_REPO_TOKEN secret authenticates the upload to Coveralls.
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to install.
+        type: string
+        default: "3.13"
+      sync-args:
+        description: Extra arguments for `uv sync`.
+        type: string
+        default: "--group dev"
+      pytest-args:
+        description: Arguments for pytest under coverage.
+        type: string
+        default: ""
+    secrets:
+      COVERALLS_REPO_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  coveralls-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A hit means coverage for these exact inputs is already on Coveralls.
+      - name: Cache coverage result
+        id: cache-coverage
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .coverage_cache
+          key: ${{ runner.os }}-coverage-${{ inputs.python-version }}-${{ hashFiles('src/**', 'tests/**', 'examples/**', 'pyproject.toml', 'uv.lock') }}
+
+      - name: Set up the project
+        if: steps.cache-coverage.outputs.cache-hit != 'true'
+        uses: $/.github/actions/setup-uv-python
+        with:
+          python-version: ${{ inputs.python-version }}
+          sync-args: ${{ inputs.sync-args }}
+
+      - name: Run tests with coverage
+        if: steps.cache-coverage.outputs.cache-hit != 'true'
+        env:
+          PYTEST_ARGS: ${{ inputs.pytest-args }}
+        # PYTEST_ARGS is unquoted on purpose: it holds several arguments, so word splitting is intended.
+        run: uv run coverage run --source=. -m pytest $PYTEST_ARGS
+
+      - name: Upload coverage to Coveralls
+        if: steps.cache-coverage.outputs.cache-hit != 'true'
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          github-token: ${{ github.token }}
+          repo-token: ${{ secrets.COVERALLS_REPO_TOKEN }}
+
+      - name: Record the upload
+        if: steps.cache-coverage.outputs.cache-hit != 'true'
+        run: mkdir -p .coverage_cache && touch .coverage_cache/done
